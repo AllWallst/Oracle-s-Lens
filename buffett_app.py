@@ -8,7 +8,7 @@ import numpy as np
 # -----------------------------------------------------------------------------
 # CONFIGURATION & STYLING
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="The Oracle's Lens V2", layout="wide", page_icon="👓")
+st.set_page_config(page_title="The Oracle's Lens", layout="wide", page_icon="👓")
 
 st.markdown("""
 <style>
@@ -55,13 +55,17 @@ st.markdown("""
 @st.cache_data(ttl=3600)
 def fetch_company_data(ticker):
     """
-    Fetches comprehensive data including historicals for consistency checks.
+    Fetches comprehensive data including historicals.
+    CRITICAL FIX: We do NOT return the 'stock' object (yf.Ticker) itself, 
+    as it contains thread locks/sockets that break Streamlit caching.
     """
     try:
         stock = yf.Ticker(ticker)
+        
+        # Force fetch info to check validity
         info = stock.info
         
-        # We need to verify if data exists
+        # Check if key data is missing (common with bad tickers)
         if 'regularMarketPrice' not in info and 'currentPrice' not in info:
             return None, "Ticker not found or delisted. Try adding a suffix (e.g., .TO for Toronto)."
 
@@ -70,13 +74,17 @@ def fetch_company_data(ticker):
         balance_sheet = stock.balance_sheet
         cashflow = stock.cashflow
         
-        # Transpose for easier time-series analysis (Rows = Years)
-        fin_T = financials.T if not financials.empty else pd.DataFrame()
-        bs_T = balance_sheet.T if not balance_sheet.empty else pd.DataFrame()
-        cf_T = cashflow.T if not cashflow.empty else pd.DataFrame()
+        # Check if dataframes are empty
+        if financials.empty:
+             return None, "No financial data found for this ticker."
 
+        # Transpose for easier time-series analysis (Rows = Years)
+        fin_T = financials.T 
+        bs_T = balance_sheet.T 
+        cf_T = cashflow.T 
+
+        # RETURN ONLY SERIALIZABLE DATA (Dicts and DataFrames)
         return {
-            "stock": stock,
             "info": info,
             "fin": financials,
             "bs": balance_sheet,
@@ -148,7 +156,12 @@ def analyze_buffett_v2(data):
     try:
         equity_history = bs.loc['Stockholders Equity']
         # Is the most recent year higher than 3 years ago?
-        book_growth = equity_history.iloc[0] > equity_history.iloc[-1] 
+        # Note: Financials are usually usually [Current, Past, Past...]
+        # So iloc[0] is current, iloc[-1] is oldest
+        if len(equity_history) > 1:
+            book_growth = equity_history.iloc[0] > equity_history.iloc[-1] 
+        else:
+            book_growth = True # Benefit of doubt
     except:
         book_growth = False
 
@@ -169,7 +182,7 @@ def analyze_buffett_v2(data):
 # -----------------------------------------------------------------------------
 
 # --- SIDEBAR: Global Lookups ---
-st.sidebar.title("👓 The Oracle's Lens V2")
+st.sidebar.title("👓 The Oracle's Lens")
 st.sidebar.caption("Data provided by Yahoo Finance")
 
 input_ticker = st.sidebar.text_input("Enter Ticker", "RY.TO").upper()
@@ -238,7 +251,7 @@ if input_ticker:
         # 1. ROE Check
         with sc1:
             is_good = analysis['roe_pass']
-            color = "green" if is_good else "red"
+            color = "#1b5e20" if is_good else "#b71c1c" # Hex for green/red
             st.markdown(f"""
             <div class='metric-container' style='border-left-color: {color}'>
                 <div class='sub-text'>Management Quality</div>
@@ -250,7 +263,7 @@ if input_ticker:
         # 2. Debt Check
         with sc2:
             is_good = analysis['debt_pass']
-            color = "green" if is_good else "red"
+            color = "#1b5e20" if is_good else "#b71c1c"
             st.markdown(f"""
             <div class='metric-container' style='border-left-color: {color}'>
                 <div class='sub-text'>Financial Health</div>
@@ -264,7 +277,7 @@ if input_ticker:
             # Simple check: Is current margin > 40%?
             margin = analysis['current_margin']
             is_good = margin > 40
-            color = "green" if is_good else "orange" # Orange for medium margins
+            color = "#1b5e20" if is_good else "#ff9800" # Green or Orange
             st.markdown(f"""
             <div class='metric-container' style='border-left-color: {color}'>
                 <div class='sub-text'>The Moat</div>
@@ -276,7 +289,7 @@ if input_ticker:
         # 4. Growth Check
         with sc4:
             is_good = analysis['book_growth']
-            color = "green" if is_good else "red"
+            color = "#1b5e20" if is_good else "#b71c1c"
             status = "Growing" if is_good else "Declining"
             st.markdown(f"""
             <div class='metric-container' style='border-left-color: {color}'>
@@ -350,7 +363,7 @@ if input_ticker:
                         graham_num = (22.5 * eps * bvps) ** 0.5
                         st.metric("Graham Fair Value", f"{curr} {graham_num:.2f}")
                         
-                        current_p = info.get('currentPrice')
+                        current_p = info.get('currentPrice', info.get('regularMarketPrice', 0))
                         if current_p < graham_num:
                             st.success(f"✅ The stock is trading BELOW the Graham Number (Undervalued).")
                         else:
@@ -362,4 +375,4 @@ if input_ticker:
 
 # Footer
 st.markdown("---")
-st.caption("The Oracle's Lens V2 | Supports TSX, LSE, ASX, NYSE, NASDAQ | Data: Yahoo Finance")
+st.caption("The Oracle's Lens V2.1 | Supports TSX, LSE, ASX, NYSE, NASDAQ | Data: Yahoo Finance")
