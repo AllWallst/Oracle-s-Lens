@@ -3,339 +3,363 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import numpy as np
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION & STYLING
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="The Oracle's Lens", layout="wide", page_icon="📈")
+st.set_page_config(page_title="The Oracle's Lens V2", layout="wide", page_icon="👓")
 
-# Custom CSS for that "Premium/Clean" look requested by the Trader Persona
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #1e1e1e;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #333;
+    /* Premium Dark Theme Adjustments */
+    .stApp {
+        background-color: #0e1117;
+    }
+    .metric-container {
+        background-color: #262730;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 5px solid #d4af37; /* Berkshire Gold */
         margin-bottom: 10px;
     }
-    .big-font {
-        font-size: 24px !important;
+    .big-number {
+        font-size: 28px;
         font-weight: bold;
+        color: #ffffff;
     }
-    .stProgress > div > div > div > div {
-        background-color: #4CAF50;
+    .sub-text {
+        font-size: 14px;
+        color: #b0b0b0;
     }
-    h1, h2, h3 {
-        color: #f0f2f6;
+    .success-badge {
+        background-color: #1b5e20;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
     }
-    .highlight {
-        color: #4CAF50;
-        font-weight: bold;
-    }
-    .warning {
-        color: #FFC107;
-        font-weight: bold;
-    }
-    .danger {
-        color: #FF5252;
-        font-weight: bold;
+    .fail-badge {
+        background-color: #b71c1c;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# PERSONA: DATA SPECIALIST (Logic & Data Retrieval)
+# PERSONA: DATA SPECIALIST (Logic & Global Handling)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
-def get_stock_data(ticker_symbol):
+def fetch_company_data(ticker):
     """
-    Fetches robust data, handling yfinance quirks and null values.
+    Fetches comprehensive data including historicals for consistency checks.
     """
     try:
-        stock = yf.Ticker(ticker_symbol)
-        
-        # Fetch data
+        stock = yf.Ticker(ticker)
         info = stock.info
+        
+        # We need to verify if data exists
+        if 'regularMarketPrice' not in info and 'currentPrice' not in info:
+            return None, "Ticker not found or delisted. Try adding a suffix (e.g., .TO for Toronto)."
+
+        # Fetch Financials (Annual)
         financials = stock.financials
         balance_sheet = stock.balance_sheet
         cashflow = stock.cashflow
         
-        # Check if data exists
-        if financials.empty or balance_sheet.empty:
-            return None, "Insufficient financial data available for this ticker."
+        # Transpose for easier time-series analysis (Rows = Years)
+        fin_T = financials.T if not financials.empty else pd.DataFrame()
+        bs_T = balance_sheet.T if not balance_sheet.empty else pd.DataFrame()
+        cf_T = cashflow.T if not cashflow.empty else pd.DataFrame()
 
         return {
+            "stock": stock,
             "info": info,
-            "financials": financials,
-            "balance_sheet": balance_sheet,
-            "cashflow": cashflow,
-            "history": stock.history(period="5y")
+            "fin": financials,
+            "bs": balance_sheet,
+            "cf": cashflow,
+            "fin_T": fin_T,
+            "bs_T": bs_T
         }, None
     except Exception as e:
         return None, str(e)
 
-def safe_get(data_dict, key, default=0):
-    """Safely retrieves data from dictionary or dataframe."""
+def safe_calc(numerator, denominator, default=0):
     try:
-        if isinstance(data_dict, pd.DataFrame):
-            if key in data_dict.index:
-                return data_dict.loc[key].iloc[0] # Most recent
-            else:
-                return default
-        return data_dict.get(key, default)
+        if denominator == 0 or pd.isna(denominator) or pd.isna(numerator):
+            return default
+        return numerator / denominator
     except:
         return default
 
 # -----------------------------------------------------------------------------
-# PERSONA: WARREN BUFFETT (Analysis Logic)
+# PERSONA: WARREN BUFFETT (Deep Analysis Logic)
 # -----------------------------------------------------------------------------
-def analyze_buffett_metrics(data):
-    fin = data['financials']
-    bs = data['balance_sheet']
-    cf = data['cashflow']
+def analyze_buffett_v2(data):
     info = data['info']
+    fin = data['fin']
+    bs = data['bs']
+    
+    # 1. RETURN ON EQUITY (ROE) - Management Quality
+    # Formula: Net Income / Stockholder Equity
+    try:
+        net_income = fin.loc['Net Income']
+        equity = bs.loc['Stockholders Equity']
+        # Calculate for available years
+        roe_series = (net_income / equity) * 100
+        avg_roe = roe_series.mean()
+        current_roe = roe_series.iloc[0]
+    except:
+        avg_roe = 0
+        current_roe = 0
+        roe_series = []
 
-    # 1. THE MOAT: Gross Margins > 40% consistently?
+    # 2. THE MOAT (Gross Margin Stability)
     try:
         gross_profit = fin.loc['Gross Profit']
-        total_rev = fin.loc['Total Revenue']
-        margins = (gross_profit / total_rev) * 100
-        avg_margin = margins.mean()
-        current_margin = margins.iloc[0]
-        moat_score = True if avg_margin > 40 else False
+        revenue = fin.loc['Total Revenue']
+        margin_series = (gross_profit / revenue) * 100
+        avg_margin = margin_series.mean()
+        # Check if margins are consistent (std dev)
+        margin_volatility = margin_series.std()
     except:
-        current_margin = 0
-        moat_score = False
+        avg_margin = 0
+        margin_volatility = 100
+        margin_series = []
 
-    # 2. MANAGEMENT: Return on Equity > 15%?
+    # 3. FINANCIAL FORTRESS (Debt to Equity)
     try:
-        net_income = fin.loc['Net Income'].iloc[0]
-        equity = bs.loc['Stockholders Equity'].iloc[0]
-        roe = (net_income / equity) * 100
-        roe_score = True if roe > 15 else False
+        total_debt = bs.loc['Total Debt'].iloc[0]
+        total_equity = bs.loc['Stockholders Equity'].iloc[0]
+        debt_to_equity = total_debt / total_equity
     except:
-        roe = 0
-        roe_score = False
-
-    # 3. FINANCIAL STRENGTH: Can they pay off debt? (Long Term Debt < 5x Net Income)
-    try:
-        lt_debt = safe_get(bs, 'Long Term Debt', 0)
-        net_income = safe_get(fin, 'Net Income', 1) # avoid div by zero
-        debt_years = lt_debt / net_income if net_income > 0 else 99
-        debt_score = True if debt_years < 5 else False
-    except:
-        debt_years = 0
-        debt_score = False
-
-    # 4. CASH IS KING: Free Cash Flow Growth
-    try:
-        fcf = cf.loc['Free Cash Flow']
-        fcf_positive = True if fcf.iloc[0] > 0 else False
-    except:
-        # Fallback calculation
         try:
-            op_cash = cf.loc['Total Cash From Operating Activities']
-            capex = cf.loc['Capital Expenditures']
-            fcf = op_cash + capex # Capex is usually negative
-            fcf_positive = True if fcf.iloc[0] > 0 else False
+            # Fallback for older API versions or different accounting
+            lt_debt = bs.loc['Long Term Debt'].iloc[0]
+            debt_to_equity = lt_debt / bs.loc['Stockholders Equity'].iloc[0]
         except:
-            fcf_positive = False
+            debt_to_equity = 0
+
+    # 4. BOOK VALUE GROWTH (Intrinsic Value Proxy)
+    # We look at the trend of Stockholders Equity over time
+    try:
+        equity_history = bs.loc['Stockholders Equity']
+        # Is the most recent year higher than 3 years ago?
+        book_growth = equity_history.iloc[0] > equity_history.iloc[-1] 
+    except:
+        book_growth = False
 
     return {
-        "gross_margin": current_margin,
-        "moat_pass": moat_score,
-        "roe": roe,
-        "roe_pass": roe_score,
-        "debt_years": debt_years,
-        "debt_pass": debt_score,
-        "fcf_positive": fcf_positive
+        "current_roe": current_roe,
+        "avg_roe": avg_roe,
+        "roe_pass": avg_roe > 15,
+        "current_margin": 0 if isinstance(margin_series, list) else margin_series.iloc[0],
+        "margin_series": margin_series,
+        "debt_to_equity": debt_to_equity,
+        "debt_pass": debt_to_equity < 0.8, # Strict Buffett preference
+        "book_growth": book_growth,
+        "currency": info.get('currency', 'USD')
     }
 
 # -----------------------------------------------------------------------------
-# PERSONA: UI DEVELOPER (Visual Components)
-# -----------------------------------------------------------------------------
-def draw_gauge(score):
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = score,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "Buffett Quality Score"},
-        gauge = {
-            'axis': {'range': [0, 100]},
-            'bar': {'color': "#2E8B57"},
-            'steps': [
-                {'range': [0, 40], 'color': "#ff5252"},
-                {'range': [40, 70], 'color': "#ffc107"},
-                {'range': [70, 100], 'color': "#a5d6a7"}],
-        }
-    ))
-    fig.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20), paper_bgcolor='rgba(0,0,0,0)')
-    return fig
-
-# -----------------------------------------------------------------------------
-# MAIN APP LAYOUT
+# MAIN APP
 # -----------------------------------------------------------------------------
 
-# Sidebar
-st.sidebar.title("🔍 The Oracle's Lens")
+# --- SIDEBAR: Global Lookups ---
+st.sidebar.title("👓 The Oracle's Lens V2")
+st.sidebar.caption("Data provided by Yahoo Finance")
+
+input_ticker = st.sidebar.text_input("Enter Ticker", "RY.TO").upper()
+
+with st.sidebar.expander("🌍 How to find Global Stocks"):
+    st.markdown("""
+    **USA:** `AAPL`, `MSFT`, `KO`
+    **Canada (TSX):** Add `.TO` (e.g., `RY.TO`, `SHOP.TO`)
+    **UK (London):** Add `.L` (e.g., `SHEL.L`)
+    **Australia:** Add `.AX` (e.g., `BHP.AX`)
+    **India:** Add `.NS` (e.g., `RELIANCE.NS`)
+    """)
+
 st.sidebar.markdown("---")
-ticker = st.sidebar.text_input("Enter Stock Ticker (e.g. AAPL)", "AAPL").upper()
-analyze_btn = st.sidebar.button("Analyze Business")
+st.sidebar.markdown("### The Buffett Philosophy")
+st.sidebar.info("""
+1. **Understand the Business:** Simple & boring is good.
+2. **Moat:** Competitive advantage.
+3. **Management:** Honest & competent (High ROE).
+4. **Price:** Margin of Safety.
+""")
 
-st.sidebar.markdown("### How to read this tool")
-st.sidebar.info(
-    """
-    **We don't use jargon here.**
-    
-    *   **Revenue** = Money coming in the door.
-    *   **Net Income** = Money kept after paying everyone.
-    *   **Moat** = Why it's hard to compete with this company.
-    *   **Free Cash Flow** = Owner's Earnings.
-    """
-)
-
-if analyze_btn or ticker:
-    with st.spinner(f"Consulting the Oracle about {ticker}..."):
-        data_pack, error = get_stock_data(ticker)
+# --- MAIN LOGIC ---
+if input_ticker:
+    with st.spinner(f"Analyzing {input_ticker} across the globe..."):
+        data_pack, error = fetch_company_data(input_ticker)
 
     if error:
         st.error(f"❌ {error}")
     else:
-        # Extract Data
+        # Run Analysis
+        analysis = analyze_buffett_v2(data_pack)
         info = data_pack['info']
-        analysis = analyze_buffett_metrics(data_pack)
         
-        # Calculate Score (Simple weighted average)
-        score = 0
-        score += 30 if analysis['moat_pass'] else 0
-        score += 30 if analysis['roe_pass'] else 0
-        score += 20 if analysis['debt_pass'] else 0
-        score += 20 if analysis['fcf_positive'] else 0
-
-        # --- HEADER SECTION ---
+        # --- HEADER ---
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.title(f"{info.get('longName', ticker)}")
-            st.markdown(f"**Sector:** {info.get('sector', 'Unknown')} | **Industry:** {info.get('industry', 'Unknown')}")
+            st.title(f"{info.get('longName', input_ticker)}")
+            st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')}")
             
-            # The "Verdict"
-            if score >= 80:
-                st.success("🏆 **Verdict: A Wonderful Company.** High quality business with strong fundamentals.")
-            elif score >= 50:
-                st.warning("⚠️ **Verdict: A Mediocre Business.** Some good qualities, but has flaws.")
-            else:
-                st.error("🛑 **Verdict: Pass.** This does not meet the criteria of a high-quality compounder.")
+            # Currency Warning for International Traders
+            curr = info.get('currency', 'USD')
+            if curr != 'USD':
+                st.caption(f"⚠️ Note: All financial figures are in **{curr}**")
 
         with col2:
-            st.metric("Current Price", f"${info.get('currentPrice', 0)}")
-            st.caption("Market Cap: " + "{:,}".format(info.get('marketCap', 0)))
-
-        st.markdown("---")
-
-        # --- THE BUFFETT SCORECARD ---
-        c1, c2 = st.columns([1, 2])
-        
-        with c1:
-            st.plotly_chart(draw_gauge(score), use_container_width=True)
-        
-        with c2:
-            st.subheader("The 4 Pillars of Quality")
+            price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+            st.metric("Stock Price", f"{curr} {price}")
             
-            # Pillar 1: The Moat
-            check_mark = "✅" if analysis['moat_pass'] else "❌"
-            st.markdown(f"### {check_mark} 1. The Moat (Competitive Advantage)")
-            st.write(f"Does the company have high margins? We look for Gross Margins > 40%.")
-            st.progress(min(int(analysis['gross_margin']), 100))
-            st.caption(f"Current Gross Margin: {analysis['gross_margin']:.1f}%")
-
-            # Pillar 2: Management
-            check_mark = "✅" if analysis['roe_pass'] else "❌"
-            st.markdown(f"### {check_mark} 2. Management Efficiency (ROE)")
-            st.write("Is management good at using your money to make more money? Target > 15%.")
-            st.caption(f"Return on Equity: {analysis['roe']:.1f}%")
-
-            # Pillar 3: Debt
-            check_mark = "✅" if analysis['debt_pass'] else "❌"
-            st.markdown(f"### {check_mark} 3. Financial Fortress (Debt)")
-            st.write("Can they pay off all long-term debt with less than 5 years of earnings?")
-            if analysis['debt_years'] == 99:
-                 st.caption("Earnings are negative, debt is risky.")
+            # Simple Valuation Badge
+            pe = info.get('trailingPE', 0)
+            if pe > 0 and pe < 15:
+                st.markdown("<span class='success-badge'>Valuation: Cheap (P/E < 15)</span>", unsafe_allow_html=True)
+            elif pe > 30:
+                st.markdown("<span class='fail-badge'>Valuation: Expensive</span>", unsafe_allow_html=True)
             else:
-                st.caption(f"Years to pay off debt: {analysis['debt_years']:.1f} years")
+                st.markdown("<span class='success-badge' style='background-color:#888'>Valuation: Moderate</span>", unsafe_allow_html=True)
 
         st.markdown("---")
 
-        # --- PLAIN ENGLISH FINANCIALS ---
-        st.header("📖 Financials Translated")
-        st.markdown("Stop looking at complex spreadsheets. Here is the story of the money.")
+        # --- EXECUTIVE SUMMARY (Pass/Fail) ---
+        st.subheader("📋 The Oracle's Scorecard")
+        
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        
+        # 1. ROE Check
+        with sc1:
+            is_good = analysis['roe_pass']
+            color = "green" if is_good else "red"
+            st.markdown(f"""
+            <div class='metric-container' style='border-left-color: {color}'>
+                <div class='sub-text'>Management Quality</div>
+                <div class='big-number'>{analysis['avg_roe']:.1f}%</div>
+                <div class='sub-text'>5-Yr Avg ROE (>15% target)</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        tab1, tab2, tab3 = st.tabs(["💰 The Income", "🏦 The Piggy Bank (Balance Sheet)", "💸 The Cash"])
+        # 2. Debt Check
+        with sc2:
+            is_good = analysis['debt_pass']
+            color = "green" if is_good else "red"
+            st.markdown(f"""
+            <div class='metric-container' style='border-left-color: {color}'>
+                <div class='sub-text'>Financial Health</div>
+                <div class='big-number'>{analysis['debt_to_equity']:.2f}</div>
+                <div class='sub-text'>Debt-to-Equity (<0.8 target)</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 3. Moat Check (Margin Stability)
+        with sc3:
+            # Simple check: Is current margin > 40%?
+            margin = analysis['current_margin']
+            is_good = margin > 40
+            color = "green" if is_good else "orange" # Orange for medium margins
+            st.markdown(f"""
+            <div class='metric-container' style='border-left-color: {color}'>
+                <div class='sub-text'>The Moat</div>
+                <div class='big-number'>{margin:.1f}%</div>
+                <div class='sub-text'>Gross Margins (>40% target)</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 4. Growth Check
+        with sc4:
+            is_good = analysis['book_growth']
+            color = "green" if is_good else "red"
+            status = "Growing" if is_good else "Declining"
+            st.markdown(f"""
+            <div class='metric-container' style='border-left-color: {color}'>
+                <div class='sub-text'>Intrinsic Value</div>
+                <div class='big-number'>{status}</div>
+                <div class='sub-text'>Book Value Trend</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- DEEP DIVE TABS ---
+        st.markdown("### 🔍 Deep Dive Analysis")
+        tab1, tab2, tab3 = st.tabs(["💎 Management & ROE", "🏰 The Moat & Margins", "⚖️ Valuation & Price"])
 
         with tab1:
-            # Visualizing Revenue vs Profit
-            fin = data_pack['financials']
-            years = fin.columns
-            rev = fin.loc['Total Revenue']
-            net = fin.loc['Net Income']
+            st.markdown("**Warren's Favorite Number: Return on Equity (ROE)**")
+            st.write("This measures how efficiently management uses shareholder money. Consistency is key.")
             
-            fig_inc = go.Figure()
-            fig_inc.add_trace(go.Bar(x=years, y=rev, name='Sales (Revenue)', marker_color='#444'))
-            fig_inc.add_trace(go.Bar(x=years, y=net, name='Profit (Net Income)', marker_color='#4CAF50'))
-            fig_inc.update_layout(title="Sales vs. Actual Profit", barmode='group')
-            st.plotly_chart(fig_inc, use_container_width=True)
-            
-            st.info("""
-            **How to read this:** 
-            The **Grey bars** are the money the company collected from customers. 
-            The **Green bars** are what is left over for YOU (the shareholder) after paying expenses, taxes, and interest.
-            *We want to see both bars going up like a staircase.*
-            """)
+            # Visualize ROE History
+            try:
+                fin = data_pack['fin']
+                bs = data_pack['bs']
+                roe_hist = (fin.loc['Net Income'] / bs.loc['Stockholders Equity']) * 100
+                
+                # Sort by date ascending for chart
+                roe_hist = roe_hist.sort_index()
+                
+                fig_roe = px.line(x=roe_hist.index, y=roe_hist.values, markers=True, 
+                                  title="ROE History (Are they consistent?)")
+                fig_roe.add_hline(y=15, line_dash="dash", line_color="green", annotation_text="Buffett Target (15%)")
+                fig_roe.update_layout(yaxis_title="ROE %", xaxis_title="Year")
+                st.plotly_chart(fig_roe, use_container_width=True)
+            except:
+                st.warning("Not enough historical data to plot ROE trend.")
 
         with tab2:
-            bs = data_pack['balance_sheet']
-            # Plain English Translation
-            cash = safe_get(bs, 'Cash And Cash Equivalents')
-            debt = safe_get(bs, 'Total Debt')
+            st.markdown("**The Moat: Gross Margins**")
+            st.write("Companies with a durable competitive advantage (Moat) can keep margins high without fighting price wars.")
             
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric("Cash on Hand", f"${cash:,.0f}")
-                st.markdown("*Money available to weather a storm.*")
-            with col_b:
-                st.metric("Total Debt", f"${debt:,.0f}")
-                st.markdown("*Money they owe to banks/lenders.*")
-            
-            if cash > debt:
-                st.success("✅ This company has more cash than debt. Very safe.")
-            else:
-                st.warning("⚠️ This company has more debt than cash. Not necessarily bad, but risky if earnings stop.")
+            try:
+                m_hist = analysis['margin_series'].sort_index()
+                fig_margin = px.bar(x=m_hist.index, y=m_hist.values, title="Gross Margin History")
+                fig_margin.update_traces(marker_color='#d4af37') # Gold color
+                fig_margin.update_layout(yaxis_title="Gross Margin %")
+                st.plotly_chart(fig_margin, use_container_width=True)
+            except:
+                st.warning("Margin data unavailable.")
 
         with tab3:
-            st.subheader("Owner's Earnings (Free Cash Flow)")
-            st.markdown("Earnings can be faked with accounting tricks. **Cash is fact.**")
+            st.markdown("**Price vs. Value (The Benjamin Graham Check)**")
             
-            cf = data_pack['cashflow']
-            try:
-                op_cash = cf.loc['Operating Cash Flow']
-                capex = cf.loc['Capital Expenditure']
-                fcf = op_cash + capex
+            col_v1, col_v2 = st.columns(2)
+            
+            with col_v1:
+                st.markdown("#### The Price Ratios")
+                pe = info.get('trailingPE', 'N/A')
+                pb = info.get('priceToBook', 'N/A')
                 
-                fig_fcf = px.bar(x=fcf.index, y=fcf.values, title="Cash Left Over (Free Cash Flow)")
-                fig_fcf.update_traces(marker_color='#2196F3')
-                st.plotly_chart(fig_fcf, use_container_width=True)
-            except:
-                st.warning("Could not calculate Free Cash Flow from available data.")
-
-            st.markdown("""
-            **What is this?**
-            Imagine you own a lemonade stand.
-            1. You sell lemonade (Revenue).
-            2. You pay for lemons and sugar (Expenses).
-            3. You pay to fix the stand (Maintenance/Capex).
-            4. Whatever cash is left in your pocket is **Free Cash Flow**. 
-            """)
+                st.metric("P/E Ratio", pe, delta_color="inverse", help="Price to Earnings. Lower is usually better. < 15 is cheap.")
+                st.metric("P/B Ratio", pb, delta_color="inverse", help="Price to Book Value. Lower is better. < 1.5 is value territory.")
+            
+            with col_v2:
+                st.markdown("#### The Graham Number (Simplified)")
+                st.write("Benjamin Graham (Buffett's teacher) suggested a 'Fair Value' estimation.")
+                
+                try:
+                    # Graham Number Formula: Sqrt(22.5 * EPS * BookValuePerShare)
+                    eps = info.get('trailingEps')
+                    bvps = info.get('bookValue')
+                    
+                    if eps and bvps and eps > 0 and bvps > 0:
+                        graham_num = (22.5 * eps * bvps) ** 0.5
+                        st.metric("Graham Fair Value", f"{curr} {graham_num:.2f}")
+                        
+                        current_p = info.get('currentPrice')
+                        if current_p < graham_num:
+                            st.success(f"✅ The stock is trading BELOW the Graham Number (Undervalued).")
+                        else:
+                            st.warning(f"⚠️ The stock is trading ABOVE the Graham Number.")
+                    else:
+                        st.warning("Cannot calculate Graham Number (Negative Earnings or Book Value).")
+                except:
+                    st.write("Data insufficient for Graham calculation.")
 
 # Footer
 st.markdown("---")
-st.caption("Analyst: The Oracle's Lens Persona | Data: Yahoo Finance | Built with Streamlit")
+st.caption("The Oracle's Lens V2 | Supports TSX, LSE, ASX, NYSE, NASDAQ | Data: Yahoo Finance")
