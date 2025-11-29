@@ -3,376 +3,311 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-import numpy as np
+import requests
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION & STYLING
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="The Oracle's Lens", layout="wide", page_icon="👓")
+st.set_page_config(page_title="The Oracle's Lens V3", layout="wide", page_icon="🔮")
 
 st.markdown("""
 <style>
-    /* Premium Dark Theme Adjustments */
-    .stApp {
-        background-color: #0e1117;
-    }
+    .stApp { background-color: #0e1117; }
     .metric-container {
         background-color: #262730;
         padding: 15px;
         border-radius: 8px;
-        border-left: 5px solid #d4af37; /* Berkshire Gold */
+        border-left: 5px solid #d4af37;
         margin-bottom: 10px;
     }
-    .big-number {
-        font-size: 28px;
-        font-weight: bold;
-        color: #ffffff;
+    .big-number { font-size: 26px; font-weight: bold; color: #ffffff; }
+    .sub-text { font-size: 14px; color: #b0b0b0; }
+    .search-result {
+        padding: 10px;
+        border-radius: 5px;
+        border: 1px solid #444;
+        margin-bottom: 5px;
+        cursor: pointer;
     }
-    .sub-text {
-        font-size: 14px;
-        color: #b0b0b0;
-    }
-    .success-badge {
-        background-color: #1b5e20;
-        color: white;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-    }
-    .fail-badge {
-        background-color: #b71c1c;
-        color: white;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-    }
+    .stButton button { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# PERSONA: DATA SPECIALIST (Logic & Global Handling)
+# PERSONA: DATA SPECIALIST (Search & Data Logic)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=3600)
-def fetch_company_data(ticker):
+
+def search_symbol(query):
     """
-    Fetches comprehensive data including historicals.
-    CRITICAL FIX: We do NOT return the 'stock' object (yf.Ticker) itself, 
-    as it contains thread locks/sockets that break Streamlit caching.
+    Uses Yahoo Finance's public autocomplete API to find tickers from names.
+    """
+    url = "https://query2.finance.yahoo.com/v1/finance/search"
+    params = {"q": query, "quotesCount": 5, "newsCount": 0}
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        r = requests.get(url, params=params, headers=headers)
+        data = r.json()
+        if 'quotes' in data and len(data['quotes']) > 0:
+            return data['quotes']
+        return []
+    except:
+        return []
+
+@st.cache_data(ttl=3600)
+def fetch_financial_data(ticker):
+    """
+    Robust fetcher that avoids caching the Unserializable yf.Ticker object.
     """
     try:
         stock = yf.Ticker(ticker)
-        
-        # Force fetch info to check validity
         info = stock.info
         
-        # Check if key data is missing (common with bad tickers)
         if 'regularMarketPrice' not in info and 'currentPrice' not in info:
-            return None, "Ticker not found or delisted. Try adding a suffix (e.g., .TO for Toronto)."
+            return None, "Ticker not found or delisted."
 
-        # Fetch Financials (Annual)
         financials = stock.financials
         balance_sheet = stock.balance_sheet
         cashflow = stock.cashflow
         
-        # Check if dataframes are empty
-        if financials.empty:
-             return None, "No financial data found for this ticker."
-
-        # Transpose for easier time-series analysis (Rows = Years)
-        fin_T = financials.T 
-        bs_T = balance_sheet.T 
-        cf_T = cashflow.T 
-
-        # RETURN ONLY SERIALIZABLE DATA (Dicts and DataFrames)
+        # Safe extraction of basic data for calculations
         return {
             "info": info,
             "fin": financials,
             "bs": balance_sheet,
             "cf": cashflow,
-            "fin_T": fin_T,
-            "bs_T": bs_T
         }, None
     except Exception as e:
         return None, str(e)
 
-def safe_calc(numerator, denominator, default=0):
-    try:
-        if denominator == 0 or pd.isna(denominator) or pd.isna(numerator):
-            return default
-        return numerator / denominator
-    except:
-        return default
-
 # -----------------------------------------------------------------------------
-# PERSONA: WARREN BUFFETT (Deep Analysis Logic)
+# PERSONA: WARREN BUFFETT (Valuation Logic: DCF & Graham)
 # -----------------------------------------------------------------------------
-def analyze_buffett_v2(data):
-    info = data['info']
-    fin = data['fin']
-    bs = data['bs']
-    
-    # 1. RETURN ON EQUITY (ROE) - Management Quality
-    # Formula: Net Income / Stockholder Equity
-    try:
-        net_income = fin.loc['Net Income']
-        equity = bs.loc['Stockholders Equity']
-        # Calculate for available years
-        roe_series = (net_income / equity) * 100
-        avg_roe = roe_series.mean()
-        current_roe = roe_series.iloc[0]
-    except:
-        avg_roe = 0
-        current_roe = 0
-        roe_series = []
 
-    # 2. THE MOAT (Gross Margin Stability)
+def calculate_dcf(data):
+    """
+    Performs a simplified 2-stage Discounted Cash Flow analysis.
+    Buffett Style: 10% Discount Rate, Conservative Growth.
+    """
     try:
-        gross_profit = fin.loc['Gross Profit']
-        revenue = fin.loc['Total Revenue']
-        margin_series = (gross_profit / revenue) * 100
-        avg_margin = margin_series.mean()
-        # Check if margins are consistent (std dev)
-        margin_volatility = margin_series.std()
-    except:
-        avg_margin = 0
-        margin_volatility = 100
-        margin_series = []
-
-    # 3. FINANCIAL FORTRESS (Debt to Equity)
-    try:
-        total_debt = bs.loc['Total Debt'].iloc[0]
-        total_equity = bs.loc['Stockholders Equity'].iloc[0]
-        debt_to_equity = total_debt / total_equity
-    except:
+        cf = data['cf']
+        info = data['info']
+        
+        # 1. Calculate Free Cash Flow (Operating Cash - CapEx)
+        # Note: CapEx is usually negative in Yahoo data
         try:
-            # Fallback for older API versions or different accounting
-            lt_debt = bs.loc['Long Term Debt'].iloc[0]
-            debt_to_equity = lt_debt / bs.loc['Stockholders Equity'].iloc[0]
+            ocf = cf.loc['Operating Cash Flow'].iloc[0]
+            capex = cf.loc['Capital Expenditure'].iloc[0]
+            fcf = ocf + capex
         except:
-            debt_to_equity = 0
+            # Fallback for different naming conventions
+            ocf = cf.loc['Total Cash From Operating Activities'].iloc[0]
+            capex = cf.loc['Capital Expenditures'].iloc[0]
+            fcf = ocf + capex
 
-    # 4. BOOK VALUE GROWTH (Intrinsic Value Proxy)
-    # We look at the trend of Stockholders Equity over time
+        if fcf < 0:
+            return None, "Negative Free Cash Flow (Unprofitable)"
+
+        # 2. Estimate Growth Rate (Capped at 15% for safety)
+        # We'd ideally look at historical growth, but for this tool we'll use a conservative estimate
+        # based on Analyst growth projections or default to 8% if missing.
+        growth_rate = info.get('revenueGrowth', 0.05)
+        if growth_rate > 0.15: growth_rate = 0.15 # Buffett Cap
+        
+        discount_rate = 0.10 # Buffett's hurdle rate
+        terminal_growth = 0.03 # Inflation
+        
+        # 3. Project 10 Years
+        future_cash_flows = []
+        for i in range(1, 11):
+            fcf = fcf * (1 + growth_rate)
+            discounted_fcf = fcf / ((1 + discount_rate) ** i)
+            future_cash_flows.append(discounted_fcf)
+            
+        # 4. Terminal Value
+        last_fcf = fcf
+        terminal_value = (last_fcf * (1 + terminal_growth)) / (discount_rate - terminal_growth)
+        discounted_tv = terminal_value / ((1 + discount_rate) ** 10)
+        
+        total_value = sum(future_cash_flows) + discounted_tv
+        shares = info.get('sharesOutstanding', 1)
+        
+        fair_value = total_value / shares
+        return fair_value, f"Growth est: {growth_rate*100:.1f}%"
+        
+    except Exception as e:
+        return None, "Insufficient Data for DCF"
+
+def calculate_graham(data):
+    """
+    Graham Number: Sqrt(22.5 * EPS * BookValuePerShare)
+    """
     try:
-        equity_history = bs.loc['Stockholders Equity']
-        # Is the most recent year higher than 3 years ago?
-        # Note: Financials are usually usually [Current, Past, Past...]
-        # So iloc[0] is current, iloc[-1] is oldest
-        if len(equity_history) > 1:
-            book_growth = equity_history.iloc[0] > equity_history.iloc[-1] 
-        else:
-            book_growth = True # Benefit of doubt
+        info = data['info']
+        eps = info.get('trailingEps')
+        bvps = info.get('bookValue')
+        
+        if eps and bvps and eps > 0 and bvps > 0:
+            return (22.5 * eps * bvps) ** 0.5
+        return None
     except:
-        book_growth = False
-
-    return {
-        "current_roe": current_roe,
-        "avg_roe": avg_roe,
-        "roe_pass": avg_roe > 15,
-        "current_margin": 0 if isinstance(margin_series, list) else margin_series.iloc[0],
-        "margin_series": margin_series,
-        "debt_to_equity": debt_to_equity,
-        "debt_pass": debt_to_equity < 0.8, # Strict Buffett preference
-        "book_growth": book_growth,
-        "currency": info.get('currency', 'USD')
-    }
+        return None
 
 # -----------------------------------------------------------------------------
-# MAIN APP
+# MAIN APP LAYOUT
 # -----------------------------------------------------------------------------
 
-# --- SIDEBAR: Global Lookups ---
-st.sidebar.title("👓 The Oracle's Lens")
-st.sidebar.caption("Data provided by Yahoo Finance")
+# --- SIDEBAR: SEARCH & SELECT ---
+st.sidebar.title("🔮 The Oracle's Lens V3")
 
-input_ticker = st.sidebar.text_input("Enter Ticker", "RY.TO").upper()
+st.sidebar.subheader("🔎 Stock Finder")
+search_query = st.sidebar.text_input("Company Name (e.g., 'Google')", "")
 
-with st.sidebar.expander("🌍 How to find Global Stocks"):
-    st.markdown("""
-    **USA:** `AAPL`, `MSFT`, `KO`
-    **Canada (TSX):** Add `.TO` (e.g., `RY.TO`, `SHOP.TO`)
-    **UK (London):** Add `.L` (e.g., `SHEL.L`)
-    **Australia:** Add `.AX` (e.g., `BHP.AX`)
-    **India:** Add `.NS` (e.g., `RELIANCE.NS`)
-    """)
+selected_ticker = "AAPL" # Default
+
+if search_query:
+    results = search_symbol(search_query)
+    if results:
+        st.sidebar.markdown("**Found:**")
+        # create a simplified dict for the radio button
+        options = {f"{x['symbol']} - {x.get('shortname', x.get('longname'))} ({x.get('exchange')})": x['symbol'] for x in results}
+        selection = st.sidebar.radio("Select Ticker:", list(options.keys()))
+        selected_ticker = options[selection]
+    else:
+        st.sidebar.warning("No results found.")
+else:
+    st.sidebar.info("Type a company name above to find its ticker.")
+    manual_ticker = st.sidebar.text_input("Or type ticker manually:", "")
+    if manual_ticker:
+        selected_ticker = manual_ticker.upper()
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### The Buffett Philosophy")
+st.sidebar.markdown("### 🏛️ Methodology")
 st.sidebar.info("""
-1. **Understand the Business:** Simple & boring is good.
-2. **Moat:** Competitive advantage.
-3. **Management:** Honest & competent (High ROE).
-4. **Price:** Margin of Safety.
+**1. Graham Number:** For stable, asset-heavy companies (Banks, Industry).
+**2. DCF:** For modern compounders (Tech, Services).
+**3. Market Mood:** What Wall St. Analysts think.
 """)
 
-# --- MAIN LOGIC ---
-if input_ticker:
-    with st.spinner(f"Analyzing {input_ticker} across the globe..."):
-        data_pack, error = fetch_company_data(input_ticker)
+# --- MAIN CONTENT ---
+
+if selected_ticker:
+    with st.spinner(f"Consulting the Oracle about {selected_ticker}..."):
+        data, error = fetch_financial_data(selected_ticker)
 
     if error:
         st.error(f"❌ {error}")
     else:
-        # Run Analysis
-        analysis = analyze_buffett_v2(data_pack)
-        info = data_pack['info']
-        
+        info = data['info']
+        curr = info.get('currency', 'USD')
+        price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+
         # --- HEADER ---
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.title(f"{info.get('longName', input_ticker)}")
-            st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')}")
-            
-            # Currency Warning for International Traders
-            curr = info.get('currency', 'USD')
-            if curr != 'USD':
-                st.caption(f"⚠️ Note: All financial figures are in **{curr}**")
-
+            st.title(f"{info.get('longName', selected_ticker)}")
+            st.caption(f"Sector: {info.get('sector')} | Industry: {info.get('industry')}")
         with col2:
-            price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-            st.metric("Stock Price", f"{curr} {price}")
-            
-            # Simple Valuation Badge
-            pe = info.get('trailingPE', 0)
-            if pe > 0 and pe < 15:
-                st.markdown("<span class='success-badge'>Valuation: Cheap (P/E < 15)</span>", unsafe_allow_html=True)
-            elif pe > 30:
-                st.markdown("<span class='fail-badge'>Valuation: Expensive</span>", unsafe_allow_html=True)
+            st.metric("Current Price", f"{curr} {price}")
+
+        # --- VALUATION TRIANGULATION ---
+        st.subheader("⚖️ Valuation Triangulation")
+        st.markdown("Comparing different ways to value the business.")
+
+        # Calculate Valuations
+        graham_val = calculate_graham(data)
+        dcf_val, dcf_msg = calculate_dcf(data)
+        analyst_val = info.get('targetMeanPrice')
+
+        # Prepare Data for Chart
+        vals = {'Price': price}
+        if graham_val: vals['Graham Number'] = graham_val
+        if dcf_val: vals['DCF (Intrinsic)'] = dcf_val
+        if analyst_val: vals['Analyst Target'] = analyst_val
+
+        # Visualizing with Plotly
+        fig = go.Figure()
+        
+        # Current Price Line
+        fig.add_hline(y=price, line_dash="dash", line_color="white", annotation_text=f"Current: {price}")
+
+        colors = {'Graham Number': '#ff9800', 'DCF (Intrinsic)': '#4CAF50', 'Analyst Target': '#2196F3'}
+        
+        for name, value in vals.items():
+            if name != 'Price':
+                color = colors.get(name, 'grey')
+                fig.add_trace(go.Bar(x=[name], y=[value], name=name, marker_color=color, text=[f"{value:.2f}"], textposition='auto'))
+
+        fig.update_layout(title=f"Valuation Models ({curr})", height=400, template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- INTERPRETATION ---
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.markdown("#### 1. Ben Graham (The Floor)")
+            if graham_val:
+                st.metric("Graham Number", f"{graham_val:.2f}", delta=round(graham_val - price, 2))
+                if price < graham_val:
+                    st.success("Undervalued based on Assets.")
+                else:
+                    st.caption("Price exceeds asset base (Normal for Tech).")
             else:
-                st.markdown("<span class='success-badge' style='background-color:#888'>Valuation: Moderate</span>", unsafe_allow_html=True)
+                st.warning("N/A (Negative Earnings/Book)")
+
+        with c2:
+            st.markdown("#### 2. DCF (The Modern Lens)")
+            if dcf_val:
+                st.metric("DCF Value", f"{dcf_val:.2f}", delta=round(dcf_val - price, 2))
+                st.caption(f"Based on {dcf_msg}")
+                if price < dcf_val:
+                    st.success("Trading below Intrinsic Value.")
+                else:
+                    st.warning("Price assumes higher growth than 15%.")
+            else:
+                st.warning(dcf_msg)
+
+        with c3:
+            st.markdown("#### 3. The Market (Sentiment)")
+            if analyst_val:
+                st.metric("Analyst Target", f"{analyst_val:.2f}", delta=round(analyst_val - price, 2))
+                rec = info.get('recommendationKey', 'none').upper()
+                st.caption(f"Consensus: {rec}")
+            else:
+                st.warning("No Analyst Coverage")
 
         st.markdown("---")
 
-        # --- EXECUTIVE SUMMARY (Pass/Fail) ---
-        st.subheader("📋 The Oracle's Scorecard")
+        # --- BUFFETT'S CHECKLIST (Quick View) ---
+        st.subheader("📋 The Quality Scorecard")
         
-        sc1, sc2, sc3, sc4 = st.columns(4)
+        # Calculate Metrics
+        try:
+            roe = info.get('returnOnEquity', 0) * 100
+            debt_equity = info.get('debtToEquity', 0) / 100
+            gross_margins = info.get('grossMargins', 0) * 100
+            fcf_yield = (info.get('freeCashflow', 0) / info.get('marketCap', 1)) * 100
+        except:
+            roe, debt_equity, gross_margins, fcf_yield = 0, 0, 0, 0
+
+        k1, k2, k3, k4 = st.columns(4)
         
-        # 1. ROE Check
-        with sc1:
-            is_good = analysis['roe_pass']
-            color = "#1b5e20" if is_good else "#b71c1c" # Hex for green/red
-            st.markdown(f"""
-            <div class='metric-container' style='border-left-color: {color}'>
-                <div class='sub-text'>Management Quality</div>
-                <div class='big-number'>{analysis['avg_roe']:.1f}%</div>
-                <div class='sub-text'>5-Yr Avg ROE (>15% target)</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # 2. Debt Check
-        with sc2:
-            is_good = analysis['debt_pass']
-            color = "#1b5e20" if is_good else "#b71c1c"
-            st.markdown(f"""
-            <div class='metric-container' style='border-left-color: {color}'>
-                <div class='sub-text'>Financial Health</div>
-                <div class='big-number'>{analysis['debt_to_equity']:.2f}</div>
-                <div class='sub-text'>Debt-to-Equity (<0.8 target)</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # 3. Moat Check (Margin Stability)
-        with sc3:
-            # Simple check: Is current margin > 40%?
-            margin = analysis['current_margin']
-            is_good = margin > 40
-            color = "#1b5e20" if is_good else "#ff9800" # Green or Orange
-            st.markdown(f"""
-            <div class='metric-container' style='border-left-color: {color}'>
-                <div class='sub-text'>The Moat</div>
-                <div class='big-number'>{margin:.1f}%</div>
-                <div class='sub-text'>Gross Margins (>40% target)</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # 4. Growth Check
-        with sc4:
-            is_good = analysis['book_growth']
-            color = "#1b5e20" if is_good else "#b71c1c"
-            status = "Growing" if is_good else "Declining"
-            st.markdown(f"""
-            <div class='metric-container' style='border-left-color: {color}'>
-                <div class='sub-text'>Intrinsic Value</div>
-                <div class='big-number'>{status}</div>
-                <div class='sub-text'>Book Value Trend</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # --- DEEP DIVE TABS ---
-        st.markdown("### 🔍 Deep Dive Analysis")
-        tab1, tab2, tab3 = st.tabs(["💎 Management & ROE", "🏰 The Moat & Margins", "⚖️ Valuation & Price"])
-
-        with tab1:
-            st.markdown("**Warren's Favorite Number: Return on Equity (ROE)**")
-            st.write("This measures how efficiently management uses shareholder money. Consistency is key.")
+        with k1:
+            st.markdown("**Management (ROE)**")
+            st.metric("ROE", f"{roe:.1f}%", delta="Target > 15%", delta_color="off" if roe > 15 else "inverse")
+        
+        with k2:
+            st.markdown("**Safety (Debt)**")
+            st.metric("Debt/Eq", f"{debt_equity:.2f}", delta="Target < 0.8", delta_color="inverse" if debt_equity > 0.8 else "normal")
             
-            # Visualize ROE History
-            try:
-                fin = data_pack['fin']
-                bs = data_pack['bs']
-                roe_hist = (fin.loc['Net Income'] / bs.loc['Stockholders Equity']) * 100
-                
-                # Sort by date ascending for chart
-                roe_hist = roe_hist.sort_index()
-                
-                fig_roe = px.line(x=roe_hist.index, y=roe_hist.values, markers=True, 
-                                  title="ROE History (Are they consistent?)")
-                fig_roe.add_hline(y=15, line_dash="dash", line_color="green", annotation_text="Buffett Target (15%)")
-                fig_roe.update_layout(yaxis_title="ROE %", xaxis_title="Year")
-                st.plotly_chart(fig_roe, use_container_width=True)
-            except:
-                st.warning("Not enough historical data to plot ROE trend.")
+        with k3:
+            st.markdown("**Moat (Margins)**")
+            st.metric("Gross Margin", f"{gross_margins:.1f}%", delta="Target > 40%", delta_color="off" if gross_margins > 40 else "inverse")
 
-        with tab2:
-            st.markdown("**The Moat: Gross Margins**")
-            st.write("Companies with a durable competitive advantage (Moat) can keep margins high without fighting price wars.")
-            
-            try:
-                m_hist = analysis['margin_series'].sort_index()
-                fig_margin = px.bar(x=m_hist.index, y=m_hist.values, title="Gross Margin History")
-                fig_margin.update_traces(marker_color='#d4af37') # Gold color
-                fig_margin.update_layout(yaxis_title="Gross Margin %")
-                st.plotly_chart(fig_margin, use_container_width=True)
-            except:
-                st.warning("Margin data unavailable.")
-
-        with tab3:
-            st.markdown("**Price vs. Value (The Benjamin Graham Check)**")
-            
-            col_v1, col_v2 = st.columns(2)
-            
-            with col_v1:
-                st.markdown("#### The Price Ratios")
-                pe = info.get('trailingPE', 'N/A')
-                pb = info.get('priceToBook', 'N/A')
-                
-                st.metric("P/E Ratio", pe, delta_color="inverse", help="Price to Earnings. Lower is usually better. < 15 is cheap.")
-                st.metric("P/B Ratio", pb, delta_color="inverse", help="Price to Book Value. Lower is better. < 1.5 is value territory.")
-            
-            with col_v2:
-                st.markdown("#### The Graham Number (Simplified)")
-                st.write("Benjamin Graham (Buffett's teacher) suggested a 'Fair Value' estimation.")
-                
-                try:
-                    # Graham Number Formula: Sqrt(22.5 * EPS * BookValuePerShare)
-                    eps = info.get('trailingEps')
-                    bvps = info.get('bookValue')
-                    
-                    if eps and bvps and eps > 0 and bvps > 0:
-                        graham_num = (22.5 * eps * bvps) ** 0.5
-                        st.metric("Graham Fair Value", f"{curr} {graham_num:.2f}")
-                        
-                        current_p = info.get('currentPrice', info.get('regularMarketPrice', 0))
-                        if current_p < graham_num:
-                            st.success(f"✅ The stock is trading BELOW the Graham Number (Undervalued).")
-                        else:
-                            st.warning(f"⚠️ The stock is trading ABOVE the Graham Number.")
-                    else:
-                        st.warning("Cannot calculate Graham Number (Negative Earnings or Book Value).")
-                except:
-                    st.write("Data insufficient for Graham calculation.")
+        with k4:
+            st.markdown("**Yield**")
+            st.metric("FCF Yield", f"{fcf_yield:.1f}%", help="Free Cash Flow / Market Cap. Higher is better.")
 
 # Footer
 st.markdown("---")
-st.caption("The Oracle's Lens V2.1 | Supports TSX, LSE, ASX, NYSE, NASDAQ | Data: Yahoo Finance")
+st.caption("The Oracle's Lens V3 | Data: Yahoo Finance | Built with Streamlit")
